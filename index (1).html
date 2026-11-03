@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Drop Alarm">
+<meta name="theme-color" content="#111111">
+<title>Drop Alarm Demo</title>
+<style>
+  body{margin:0;font-family:system-ui,sans-serif;background:#111;color:#fff;
+       display:flex;flex-direction:column;align-items:center;justify-content:center;
+       min-height:100vh;text-align:center;padding:16px;box-sizing:border-box}
+  h1{font-size:1.4rem;margin:0 0 6px}
+  p{color:#aaa;margin:4px 0 16px;font-size:.9rem}
+  button{font-size:1.1rem;padding:14px 28px;border:0;border-radius:10px;margin:6px;
+         background:#2e7dff;color:#fff}
+  #stop{background:#e53935;display:none}
+  #count{font-size:6rem;font-weight:800;color:#ffb300;line-height:1.1}
+  #ok{background:#2e9e4f}
+  #g{font-size:3rem;font-weight:700;margin:10px 0}
+  #status{font-size:1.1rem;margin-bottom:10px}
+  body.alarm{animation:flash .4s infinite}
+  @keyframes flash{0%{background:#b00020}50%{background:#111}100%{background:#b00020}}
+  label{font-size:.85rem;color:#aaa}
+  input[type=range]{width:240px}
+</style>
+</head>
+<body>
+  <h1>🚗 Accident / Drop Detection Demo</h1>
+  <p>Tap Start, then drop the phone onto a soft surface (bed, pillow, sofa) or shake it fast.</p>
+
+  <div id="status">Not started</div>
+  <div id="g">0.0 g</div>
+
+  <div id="countBox" style="display:none">
+    <div style="font-size:1rem;color:#ffb300">Impact detected! Alarm in</div>
+    <div id="count">10</div>
+    <button id="ok">I'M OK - CANCEL</button>
+  </div>
+
+  <button id="start">Start Detection</button>
+  <button id="test">Test Detection</button>
+  <button id="stop">STOP ALARM</button>
+
+  <div style="margin-top:18px">
+    <label>Sensitivity (impact threshold): <span id="thVal">2.5</span> g</label><br>
+    <input id="th" type="range" min="1.5" max="4" step="0.1" value="2.5">
+  </div>
+
+<script>
+let ctx, osc, lfo, alarmOn = false, running = false;
+let freeFallStart = 0, freeFallSeen = 0;
+const FREE_FALL_G = 0.35;      // below this = phone is falling
+const FREE_FALL_MS = 80;       // must be falling at least this long
+const WINDOW_MS = 1500;        // impact must come within this time after free fall
+const SHAKE_DELTA = 0.9;       // change in g between readings that counts as a jerk
+const SHAKE_COUNT = 6;         // jerks needed within 1 second (lower = more sensitive)
+let prevG = 1, shakeTimes = [];
+
+const $ = id => document.getElementById(id);
+
+function startAlarm(){
+  if(alarmOn) return;
+  alarmOn = true;
+  ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+  osc = ctx.createOscillator();
+  lfo = ctx.createOscillator();
+  const lfoGain = ctx.createGain();
+  osc.type = 'square';
+  osc.frequency.value = 900;
+  lfo.frequency.value = 3;          // siren speed
+  lfoGain.gain.value = 300;         // siren range
+  lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
+  osc.connect(ctx.destination);
+  osc.start(); lfo.start();
+  document.body.classList.add('alarm');
+  $('stop').style.display = 'inline-block';
+  $('status').textContent = '🚨 DROP / IMPACT DETECTED!';
+  if(navigator.vibrate) navigator.vibrate([500,200,500,200,500,200,500]);
+}
+
+const COUNTDOWN_SEC = 10;      // seconds before the alarm rings
+let counting = false, timer = null, left = 0;
+
+function beep(){
+  try{
+    ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    o.type = 'sine'; o.frequency.value = 1000;
+    o.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.12);
+  }catch(e){}
+}
+
+function trigger(){
+  if(alarmOn || counting) return;
+  counting = true;
+  left = COUNTDOWN_SEC;
+  $('count').textContent = left;
+  $('countBox').style.display = 'block';
+  $('status').textContent = 'Are you OK? Cancel to stop the alert';
+  beep();
+  if(navigator.vibrate) navigator.vibrate(200);
+  timer = setInterval(() => {
+    left--;
+    $('count').textContent = left;
+    if(left > 0){
+      beep();
+      if(navigator.vibrate) navigator.vibrate(100);
+    } else {
+      cancelCountdown();
+      startAlarm();            // time is up -> ring the siren
+    }
+  }, 1000);
+}
+
+function cancelCountdown(){
+  clearInterval(timer);
+  counting = false;
+  $('countBox').style.display = 'none';
+}
+
+function userOk(){
+  cancelCountdown();
+  freeFallSeen = 0; freeFallStart = 0; shakeTimes = [];
+  $('status').textContent = running ? 'Cancelled. Monitoring…' : 'Cancelled';
+}
+
+function stopAlarm(){
+  if(!alarmOn) return;
+  alarmOn = false;
+  try{ osc.stop(); lfo.stop(); }catch(e){}
+  document.body.classList.remove('alarm');
+  $('stop').style.display = 'none';
+  if(navigator.vibrate) navigator.vibrate(0);
+  $('status').textContent = running ? 'Monitoring… drop the phone' : 'Stopped';
+  freeFallSeen = 0; freeFallStart = 0;
+}
+
+function onMotion(e){
+  const a = e.accelerationIncludingGravity;
+  if(!a || a.x == null) return;
+  const g = Math.sqrt(a.x*a.x + a.y*a.y + a.z*a.z) / 9.81;
+  $('g').textContent = g.toFixed(2) + ' g';
+  const now = Date.now();
+  const impactG = parseFloat($('th').value) + 0.0;
+
+  // 1) Free fall: total acceleration close to 0 g
+  if(g < FREE_FALL_G){
+    if(!freeFallStart) freeFallStart = now;
+    if(now - freeFallStart >= FREE_FALL_MS) freeFallSeen = now;
+  } else {
+    freeFallStart = 0;
+  }
+
+  // 2) Impact: sudden spike shortly after free fall
+  if(freeFallSeen && now - freeFallSeen < WINDOW_MS && g > impactG){
+    trigger();
+    freeFallSeen = 0;
+  }
+
+  // 3) Fast shake: several sharp changes in acceleration within 1 second
+  if(Math.abs(g - prevG) > SHAKE_DELTA){
+    shakeTimes.push(now);
+  }
+  prevG = g;
+  shakeTimes = shakeTimes.filter(t => now - t < 1000);
+  if(shakeTimes.length >= SHAKE_COUNT){
+    trigger();
+    shakeTimes = [];
+  }
+}
+
+async function start(){
+  ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); // unlock audio
+  if(ctx.state === 'suspended') await ctx.resume();
+
+  // iOS needs explicit permission
+  if(typeof DeviceMotionEvent !== 'undefined' &&
+     typeof DeviceMotionEvent.requestPermission === 'function'){
+    const res = await DeviceMotionEvent.requestPermission();
+    if(res !== 'granted'){ $('status').textContent = 'Motion permission denied'; return; }
+  }
+  window.addEventListener('devicemotion', onMotion);
+  running = true;
+  $('status').textContent = 'Monitoring… drop the phone';
+  $('start').style.display = 'none';
+}
+
+$('start').onclick = start;
+$('stop').onclick = stopAlarm;
+$('ok').onclick = userOk;
+$('test').onclick = async () => {
+  ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+  if(ctx.state === 'suspended') await ctx.resume();
+  trigger();
+};
+$('th').oninput = e => $('thVal').textContent = e.target.value;
+
+if(!window.DeviceMotionEvent) $('status').textContent = 'No motion sensor on this device';
+</script>
+</body>
+</html>
